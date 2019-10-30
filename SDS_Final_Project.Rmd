@@ -1,0 +1,814 @@
+---
+title: "Density estimate of apparent magnitude according to three different infrared wavelight filter"
+author: "Davide Manfredini"
+date: "25/07/2019"
+output: pdf_document
+---
+
+# Packages
+
+Here there is a list of the packages used:
+
+- __R2Jags__
+- __dplyr__
+- __gsubfn__
+- __gridExtra__
+- __grid__
+- __gtable__
+- __knitr__
+- __kableExtra__
+- __MASS__
+- __coda__
+- __lattice__
+- __mcmcplots__
+- __ggmcmc__
+- __e1071__
+
+```{r, echo=FALSE,warning=FALSE}
+#Libreries
+suppressMessages(require(R2jags))
+suppressMessages(require(dplyr))
+suppressMessages(require(gsubfn))
+suppressMessages(require(gridExtra))
+suppressMessages(require(grid))
+suppressMessages(require(gtable))
+suppressMessages(require(knitr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(MASS))
+suppressMessages(library(coda))
+suppressMessages(require(lattice))
+suppressMessages(require(mcmcplots))
+suppressMessages(require(ggmcmc))
+suppressMessages(library(e1071))
+```
+
+# Data Illustration and download
+
+Data was taken from [Kaggle](https://www.kaggle.com/solorzano/rave-dr5-gaia-dr2-consolidated) and they were collected during Gaia mission. Gaia is a mission of the European Space Agency (ESA) that aims to accurately measure the position, distance and magnitude of over a billion stars. RAVE is a radial velocity dataset. RAVE also provides spectrophotometric parallax data, as well as cross-identification of stars with a number of other datasets, including Gaia DR2.
+
+The dataset present an huge number of features ($36$ columns), by my analysis is focused only on three particular features:
+
+- __r_jmag_2mass__
+- __r_hmag_2mass__
+- __r_kmag_2mass__
+
+These feature regards the _apparent magnitude_, that is the measure of the light flow that we receive from a star, that is different from the quantity of light that the star emits. The bigger this value, the smaller will be the brightness of the star appears.
+
+This magnitude were relevated during the mission Gaia, using three different filter, that is the infrared wavelength for which you observe light.
+
+The porpouse of this analysis is to discover if the distribution of data, changes according to the filter used.
+
+```{r}
+#Illustration of data and upload
+
+data<-read.csv('gaia-dr2-rave-35.csv')
+
+
+M<-as.data.frame(cbind(data$source_id,data$r_hmag_2mass,data$r_jmag_2mass,data$r_kmag_2mass))
+colnames(M)<-c('star_id','R_HMag','R_JMag','R_KMag')
+str(M)
+```
+
+
+```{r}
+
+hist(M$R_HMag,prob=TRUE,breaks=100,main = 'Histogram for R_HMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+lines(density(M$R_HMag), lwd=3, col='red')
+hist(M$R_JMag,prob=TRUE,breaks=100,main = 'Histogram for R_JMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+lines(density(M$R_JMag), lwd=3, col='blue')
+hist(M$R_KMag,prob=TRUE,breaks=100,main = 'Histogram for R_KMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+lines(density(M$R_KMag), lwd=3, col='green')
+```
+
+We can see that, more or less, all distributions have the same shape of a __Gaussian distribution__ with mean different from $0$. We can also observe that the distributions are not perfectly symmetrical, in fact we can see that there is a slight discrepancy between the tails. This suggests a __Gamma__ distribution. So the model proposed are two:
+
+Before start our analysis using MCMC simulation, let's do a simple analysis on the data. The first thing we do is check if there is linear correlation among variables.
+
+```{r}
+cor(M)
+```
+
+They are high correlated variable, because both are data regarding the same star, but the data are collected using a different filter.
+The next thing is look at _skewness_ and _kurtosis_:
+
+```{r}
+k_s <- data.frame(skewness=double(),
+                  kurtosis=double(),
+                  stringsAsFactors = FALSE)
+k_s<-rbind(k_s,c(skewness(M$R_HMag),kurtosis(M$R_HMag)))
+k_s<-rbind(k_s,c(skewness(M$R_JMag),kurtosis(M$R_JMag)))
+k_s<-rbind(k_s,c(skewness(M$R_KMag),kurtosis(M$R_KMag)))
+colnames(k_s)<-c('skewness','kurtosis')
+rownames(k_s)<-c('R_HMag','R_JMag','R_KMag')
+
+kable(k_s) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+These are the value for the skewness and kurtosis for the data taken with a different filter. We can see that the skewness belongs to $[-0.5,0.5]$, this means that the data are fairly symmetrical. Indeed regarding the kurtosis and rembring that it a measure of the "tailedness" of the probability distribution of a real-valued random variable. The kurtosis decreases as the tails become lighter.  It increases as the tails become heavier. In our case for J-Magnitude the kurtosis is slightly higher than the other two cases.
+
+At this point, these are the theoretical models:
+
+#### Normal Model
+
+$$
+\begin{aligned}
+&Y|\mu,\sigma^2\sim\mathcal{N}(\mu,\sigma^2)\\
+&\mu \sim \mathcal{N}(0,1)\\
+&\sigma^2 \sim \textit{Gamma}(0.001,0.001)
+\end{aligned}
+$$
+
+#### Gamma Model
+
+$$
+\begin{aligned}
+&Y|k,\theta\sim\textit{Gamma}(k,\theta)\\
+&k \sim \textit{Gamma}(0.01,0.01)\\
+&\theta \sim \textit{Gamma}(0.01,0.01)
+\end{aligned}
+$$
+
+## Data reduction
+
+The dataset is huge, and then the estimation of parameter using MCMC it was so slow (it requires more than one hour and half for a single column), so in order to slve this problem, my analysis is made on a smaller sample of the real dataset, that has the same distribution.
+```{r}
+Small_M<-sample_n(M, 7000)
+hist(Small_M$R_HMag, prob=TRUE,main = 'Histogram for R_HMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+hist(Small_M$R_JMag, prob=TRUE,main = 'Histogram for R_JMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+hist(Small_M$R_KMag, prob=TRUE,main = 'Histogram for R_KMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+```
+
+```{r}
+k_s_small <- data.frame(skewness=double(),
+                  kurtosis=double(),
+                  stringsAsFactors = FALSE)
+k_s_small<-rbind(k_s_small,c(skewness(Small_M$R_HMag),kurtosis(Small_M$R_HMag)))
+k_s_small<-rbind(k_s_small,c(skewness(Small_M$R_JMag),kurtosis(Small_M$R_JMag)))
+k_s_small<-rbind(k_s_small,c(skewness(Small_M$R_KMag),kurtosis(Small_M$R_KMag)))
+
+colnames(k_s_small)<-c('skewness','kurtosis')
+rownames(k_s_small)<-c('R_HMag','R_JMag','R_KMag')
+
+kable(k_s_small) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+# Bugs Models
+
+These are the models defined before, written using BUGS
+```{r}
+modelnormal <- function() {
+  for (i in 1:N){
+    y[i] ~ dnorm(mu, tau)
+  }
+  mu ~ dnorm(mu0, sigma0)
+  sigma ~ dgamma(v1, v2)
+  tau <- pow(sigma,  -2)
+}
+```
+
+```{r}
+modelgamma<-function()
+   {
+    for (i in 1:N) {
+      y[i]~dgamma(k,theta)
+    }
+    k~dgamma(0.01,0.01)
+    theta~dgamma(0.01,0.01)
+  }
+```
+
+# Functions
+
+The following functions, make the analysis for three columns using the two different models
+```{r}
+normal_fit<-function(values)
+{
+  data_for_fitting <- list(N = length(values),
+                          mu0 = 0,
+                          sigma0 = 1,
+                          v1 = 0.001,
+                          v2 = 0.001,
+                          y=values)
+  #Choose the number of chain
+  fit<-jags(model=modelnormal,
+            data = data_for_fitting,
+            n.iter = 10000,param=c('mu','tau'),
+            n.thin = 10,
+            DIC=TRUE,
+            n.chains = 4)
+  
+  DIC<-fit$BUGSoutput$DIC
+  pD <-fit$BUGSoutput$pD
+  
+  mc.fit<-as.mcmc(fit)
+  results<-mc.fit
+  
+  print(summary(results))
+  
+  mu=summary(results)$statistics[2,1]
+  tau=summary(results)$statistics[3,1]
+  
+  return(list('mu'=mu,'tau'=tau,'DIC'=DIC,'pD'=pD,'fit'=fit))
+  
+}
+
+
+gamma_fit<-function(values)
+{
+  data_for_fitting<-list(N = length(values), y=values)
+  
+  fit<-jags(model=modelgamma,
+            data = data_for_fitting,
+            n.iter = 10000,
+            param=c('k','theta'),
+            n.thin = 10,
+            n.chains = 4,
+            DIC=TRUE)
+  
+  DIC<-fit$BUGSoutput$DIC
+  pD <-fit$BUGSoutput$pD
+  
+  mc.fit<-as.mcmc(fit)
+  results<-mc.fit
+  
+  print(summary(results))
+  
+  k=summary(results)$statistics[2,1]
+  theta=summary(results)$statistics[3,1]
+  
+  return(list('k'=k,'theta'=theta,'DIC'=DIC,'pD'=pD,'fit'=fit))
+}  
+
+```
+
+# Fitting the models
+
+The next part regards the initialization of some parameter in order to have a nice view of the obtained data and then the different analysis will start, showing the different traceplot and autocorrelation plot, in order to show if there is or not covergence to the value to estimate and if there is, how fast it is.
+
+Will be plotted the posterior density for each estimated parameter
+
+Moreover will be shown the _HPD Intervals_. An $1-\alpha$ confidence interval is an interval $C_n$ for which, considered a posterior distribution $\pi(\theta|\underline{x_n})$ $$\int_{C_n}\pi(\theta|\underline{x_n})d\theta=1-\alpha$$
+
+Any point within the interval has a higher density than any other point outside. Thus, HPD interval is the collection of most likely values of the parameters.
+The most common value for $alpha$ are $.90$,$.95$,$.99$
+
+
+## Initialization of some variables
+
+```{r}
+
+normal_parameters<-data.frame(mu=double(),
+                              tau=double(),
+                              DIC=double(),
+                              pD=double(),
+                              stringsAsFactors=FALSE)
+
+gamma_parameters<-data.frame( k=double(),
+                              theta=double(),
+                              DIC=double(),
+                              pD=double(),
+                              stringsAsFactors=FALSE)
+likelihood_ratios<-rep(NA,3)
+idx=1
+
+set.seed(1234)
+```
+
+## Analysis for R_HMag
+
+#### Using Normal Model
+
+As said before, the first analysis will be taken using the normal model 
+
+```{r}
+Y=as.vector(Small_M$R_HMag)
+normal_temp<-normal_fit(Y)
+
+f<-normal_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f), parms = c('mu','tau'))
+```
+
+
+```{r}
+f.gg<-ggs(as.mcmc(f))
+ggs_density(f.gg)
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg)
+```
+
+In this case, we can see from the traceplots that we reached the convergence for both paramenters, indeed we can see that the chains for both paramenters, oscillate around a specific value. Then they are stabilized theirself n their stable distribution.
+We can also see that autocorrelation go to zero for both parameter, and this is another check for the convergence.
+
+The last thing is looking to the High Posterior Density Intervals.
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f),prob=.99)
+```
+
+Then we store the approximated parameters
+```{r}
+mu<-normal_temp$mu
+tau<-normal_temp$tau
+
+normal_parameters<-rbind(normal_parameters,normal_temp[-length(normal_temp)])
+```
+
+#### Using Gamma Model
+
+As done before first we take a look at traceplots
+
+```{r}
+gamma_temp<-gamma_fit(Y)
+
+f1<-gamma_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f1), parms = c('k','theta'))
+```
+
+
+```{r}
+f.gg1<-ggs(as.mcmc(f1))
+ggs_density(f.gg1)
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg1)
+```
+
+In this case, we can see from the traceplots that the behaviour of the chains is not the behaviour of a chain that reached the convergence, because we can see that there is not a fluctuation around a value. But this doesn't mean that there is not convergence, maybe this model needs more iteration in order to reach the convergence. We can see this thing from the autocorrelation plot, indeed the plots goes to $0$ in a very slowly.
+
+These are the HPD
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f1),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f1),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f1),prob=.99)
+```
+
+Now we store the parameters:
+
+```{r}
+gamma_parameters<-rbind(gamma_parameters,gamma_temp[-length(gamma_temp)])
+
+k<-gamma_temp$k
+theta<-gamma_temp$theta
+likelihood_ratios[1]<-sum(log(dnorm(x=Y,mean=mu,sd=1/tau)))-sum(log(dgamma(x=Y,shape = k,rate = theta)))
+
+```
+
+## Analysis for R_JMag
+
+#### Using Normal Model
+
+As said before, the first analysis will be taken using the normal model 
+
+```{r}
+Y=as.vector(Small_M$R_JMag)
+normal_temp<-normal_fit(Y)
+
+f<-normal_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f), parms = c('mu','tau'))
+```
+
+
+```{r}
+f.gg<-ggs(as.mcmc(f))
+ggs_density(f.gg)
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg)
+```
+
+In this case, we can see from the traceplots that we reached the convergence for both paramenters, indeed we can see that the chains for both paramenters, oscillate around a specific value. Then they are stabilized theirself n their stable distribution.
+We can also see that autocorrelation go to zero for both parameter, and this is another check for the convergence.
+
+Then the HPD:
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f),prob=.99)
+```
+
+And we store the parameters
+
+```{r}
+mu<-normal_temp$mu
+tau<-normal_temp$tau
+
+normal_parameters<-rbind(normal_parameters,normal_temp[-length(normal_temp)])
+```
+
+#### Using Gamma Model
+
+As done before first we take a look at traceplots
+
+```{r}
+gamma_temp<-gamma_fit(Y)
+
+f1<-gamma_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f1), parms = c('k','theta'))
+```
+
+```{r}
+f.gg1<-ggs(as.mcmc(f1))
+ggs_density(f.gg1)
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg1)
+```
+
+The same thinghs that we said for H_Magnitude are still true!
+
+Then the HPD:
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f1),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f1),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f1),prob=.99)
+```
+
+Now we store the parameters:
+
+```{r}
+gamma_parameters<-rbind(gamma_parameters,gamma_temp[-length(gamma_temp)])
+
+k<-gamma_temp$k
+theta<-gamma_temp$theta
+likelihood_ratios[2]<-sum(log(dnorm(x=Y,mean=mu,sd=1/tau)))-sum(log(dgamma(x=Y,shape = k,rate = theta)))
+
+```
+
+## Analysis for R_KMag
+
+#### Using Normal Model
+
+As said before, the first analysis will be taken using the normal model 
+
+```{r}
+Y=as.vector(Small_M$R_KMag)
+normal_temp<-normal_fit(Y)
+
+f<-normal_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f), parms = c('mu','tau'))
+```
+
+
+```{r}
+f.gg<-ggs(as.mcmc(f))
+ggs_density(f.gg)
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg)
+```
+
+In this case, we can see from the traceplots that we reached the convergence for both paramenters, indeed we can see that the chains for both paramenters, oscillate around a specific value. Then they are stabilized theirself n their stable distribution.
+We can also see that autocorrelation go to zero for both parameter, and this is another check for the convergence.
+
+Then the HPD
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f),prob=.99)
+```
+
+And we store the parameters:
+
+```{r}
+mu<-normal_temp$mu
+tau<-normal_temp$tau
+
+normal_parameters<-rbind(normal_parameters,normal_temp[-length(normal_temp)])
+```
+
+#### Using Gamma Model
+
+As done before first we take a look at traceplots
+
+```{r}
+gamma_temp<-gamma_fit(Y)
+
+f1<-gamma_temp$fit
+par(mar = c(2, 0.5, 4, 2), oma = c(4, 4, 0.2, 0.2),mfrow=c(3,1))
+traplot(as.mcmc(f1), parms = c('k','theta'))
+```
+
+```{r}
+f.gg1<-ggs(as.mcmc(f1))
+ggs_density(f.gg1)
+denplot(as.mcmc(f1),parms = c('k','theta'))
+```
+
+And finally let's look to the autocorrelation
+
+```{r}
+ggs_autocorrelation(f.gg1)
+```
+
+The thigh we said for H-Magnitude and J-Magnitude are still true!
+
+Then the HPD:
+
+```{r}
+cat('----------- 90% -----------')
+HPDinterval(as.mcmc(f1),prob=.90)
+
+cat('----------- 95% -----------')
+HPDinterval(as.mcmc(f1),prob=.95)
+
+cat('----------- 99% -----------')
+HPDinterval(as.mcmc(f1),prob=.99)
+```
+Now we store the parameters:
+
+```{r}
+gamma_parameters<-rbind(gamma_parameters,gamma_temp[-length(gamma_temp)])
+
+k<-gamma_temp$k
+theta<-gamma_temp$theta
+likelihood_ratios[3]<-sum(log(dnorm(x=Y,mean=mu,sd=1/tau)))-sum(log(dgamma(x=Y,shape = k,rate = theta)))
+
+```
+
+In the following part, will be shown the obtained parameters from JAGS
+
+#### Normal
+
+```{r}
+dd<-normal_parameters[,c('mu','tau')]
+rownames(dd)<-colnames(Small_M)[c(2,3,4)]
+
+kable(dd) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+#### Gamma
+
+```{r}
+dd<-gamma_parameters[,c('k','theta')]
+rownames(dd)<-colnames(Small_M)[c(2,3,4)]
+kable(dd) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+## Model comparison
+
+In this part, we re going to see, how the two proposed model fit the data. The first analysis it's only graphical, and what we expect is that since the chain for the parameter of the gamma model, do not reach the convergence, the model that best fits the data is the normal model
+
+### Graphical
+
+```{r}
+
+hist(Small_M$R_HMag,prob=TRUE,ylim=c(0,.6),
+     main='Histogram for R_HMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+curve(dgamma(x,shape = gamma_parameters$k[1],rate = gamma_parameters$theta[1]),
+      lwd=2,col='red',add=TRUE,ylim=c(0,1.2))
+curve(dnorm(x,mean=normal_parameters$mu[1],
+            sd=sqrt(1/normal_parameters$tau[1])),from=2, to=14, add=TRUE,
+      lwd=2,col='blue',ylim=c(0,1.2))
+legend('topright', legend=c('Gamma','Normal'), col=c('red','blue'), 
+       lty=1, bty='n', lwd=2, cex=1, text.col='black', horiz=F)
+
+```
+
+```{r}
+hist(Small_M$R_JMag,prob=TRUE,ylim=c(0,.6), 
+     main='Histogram for R_JMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+curve(dgamma(x,shape = gamma_parameters$k[2],rate = gamma_parameters$theta[2]),
+      lwd=2,col='red',add=TRUE,ylim=c(0,1.2))
+curve(dnorm(x,mean=normal_parameters$mu[2],
+            sd=sqrt(1/normal_parameters$tau[2])),from=2, to=14, add=TRUE,lwd=2,col='blue',ylim=c(0,1.2))
+legend('topright', legend=c('Gamma','Normal'), 
+       col=c('red','blue'), lty=1, bty='n', lwd=2, cex=1, text.col='black', horiz=F)
+```
+
+```{r}
+hist(Small_M$R_KMag,prob=TRUE,ylim=c(0,.6), 
+     main='Histogram for R_KMag',xlab = 'Magnitudes',col='pink',border = 'orchid')
+curve(dgamma(x,shape = gamma_parameters$k[3],rate = gamma_parameters$theta[3]),
+      lwd=2,col='red',add=TRUE,ylim=c(0,1.2))
+curve(dnorm(x,mean=normal_parameters$mu[3],sd=sqrt(1/normal_parameters$tau[3])),
+      from=2, to=14, add=TRUE,lwd=2,col='blue',ylim=c(0,1.2))
+legend('topright', legend=c('Gamma','Normal'), 
+       col=c('red','blue'), lty=1, bty='n', lwd=2, cex=1, text.col='black', horiz=F)
+```
+
+## Which is better?
+
+In this part, we are going to discuss which of the the two proposed model, better fits the data. In order to do this, two different approach were used:
+
+- Likelihood ratio
+- DIC (Deviance Infomation Criterion)
+
+Model comparison is typically done by comparing the likelihoods of some data $x_i$ under two different model:$A_1$ and $A_2$. Under a likelihood framework, the interpretation is clear: if the data are more likely under $A_1$, then $A_1$ is a better explanation of the data; and conversely for $A_2$.
+
+### Bayes Factor
+
+The first criteria is the likelihood ratio. As said before assesses the goodness of fit of two competing statistical models based on the ratio of their likelihoods.
+It is possible to do this this check using the __Bayes factor__ that is the ratio of marginal likelihood of $A_1$ to that of $A_2$. It is defined as: $$K=\dfrac{\mathbb{P}(\{x_1,\dots,x_n\}|A_1)}{\mathbb{P}(\{x_1,\dots,x_n\}|A_2)}=\frac{\prod_{i=1}^nm(x_i|A_1)}{\prod_{i=1}^nm(x_i|A_2)}.$$
+In this case the model $A_1$ corresponds to the Normal model, while $A_2$ corresponds to the Gamma model, and according to $K$:
+
+- If $K>>1$ then the model $A_1$ will be a better fit
+
+- If $K<<1$ then the model $A_2$ will be a better fit
+
+- If $K \approx 1$ there is not a great difference between the two models
+
+In our case will be use a logarithmic version of this ratio: $$K=\log\left(\sum_{i=1}^nm(x_i|A_1)\right)-\log\left(\sum_{i=1}^nm(x_i|A_2)\right)$$
+
+```{r}
+likelihood_ratios
+```
+
+According to this, we can see that R_HMag and R_KMag are better approximated using a normal, and R_JMag are better approximated using a Gamma Distribution. The let us think that there is an effect due to the different filter used to retrive data.
+
+### DIC
+
+The second test to understand what is the best model is done using the DIC. 
+The Deviance Information Criterion is useful in bayesian model selection problems, where the posterior distributions of the model have been obtained from MCMC simulations.
+The measure of fit $\bar{D}$ can be combined with the measure of complexity $p_D$ to produce the Deviance Information Criterion:
+
+$$
+\begin{aligned}
+DIC &= \bar{D}+p_D\\&=\hat{D}+2p_D
+\end{aligned}
+$$
+
+where once defined the deviance as $D(\theta)-2\log(p(y|\theta))$, the $pD$ is computed by JAGS using the formula propoused by __Geleman et al.(2004,p=182)__:
+$$p_D=\frac{\mathbb{V}(D(\theta))}{2}$$
+
+The idea is that models with smaller DIC should be preferred to models with larger DIC.
+
+#### Normal
+
+```{r}
+D_gamma<-gamma_parameters[,c('DIC','pD')]
+D_normal<-normal_parameters[,c('DIC','pD')]
+#dbar=DIC-pD
+#Dthetabar=dic-2pD
+D_gamma$dBar=D_gamma$DIC-D_gamma$pD
+D_gamma$DthetaBar=D_gamma$DIC-2*D_gamma$pD
+
+D_normal$dBar=D_normal$DIC-D_normal$pD
+D_normal$DthetaBar=D_normal$DIC-2*D_normal$pD
+
+#Smaller Dic model preferred than high DIC model
+rownames(D_normal)<-colnames(Small_M)[c(2,3,4)]
+kable(D_normal) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+#### Gamma
+
+```{r}
+rownames(D_gamma)<-colnames(Small_M)[c(2,3,4)]
+kable(D_gamma) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+```
+
+For what said before, models with smaller $DIC$ should be preferred to models with larger $DIC$, then in this case, the normal model is the chosen model. This is in contast with what we said before.
+
+## Bayesian vs Frequentist
+
+In the previous part, we said that the preferred model is the normal model, now can be interesting to do a comparison between what we find using a Bayesian approch with what will find with a Frequentist approach. Now we are focused only on the normal model.
+
+For the nromal distribution, the _Maximum Likelihood Estimator _ for the paramenters are well known, indeed if $\hat{\mu}=\hat{\mu}(x_1,\dots,x_n)$ is the MLE for the mean $\mu$ and $\hat{\sigma}^2=\hat{\sigma}^2(x_1,\dots,x_n)$ is the MLE for the variance $\sigma^2$, then
+
+$$
+\begin{aligned}
+\hat{\mu}&=\frac{1}{n}\sum_{i=1}^n x_i\\
+\hat{\sigma}^2&=\frac{1}{n}\sum_{i=1}^n(x_i-\hat{\mu})^2
+\end{aligned}
+$$
+
+Let's see what happens graphically
+```{r}
+mu_MLE_H=sum(Small_M$R_HMag)/length(Small_M$R_HMag)
+mu_MLE_J=sum(Small_M$R_JMag)/length(Small_M$R_JMag)
+mu_MLE_K=sum(Small_M$R_KMag)/length(Small_M$R_KMag)
+
+sd_MLE_H=sqrt(sum((Small_M$R_HMag-mu_MLE_H)^2)/length(Small_M$R_HMag))
+sd_MLE_J=sqrt(sum((Small_M$R_JMag-mu_MLE_J)^2)/length(Small_M$R_JMag))
+sd_MLE_K=sqrt(sum((Small_M$R_HMag-mu_MLE_K)^2)/length(Small_M$R_KMag))
+
+curve(dnorm(x,mean=mu_MLE_H,sd=sd_MLE_H),from=2,to=14, 
+      lwd=3, col='red',main='R_HMag',ylab = 'densities')
+curve(dnorm(x,mean=normal_parameters$mu[1],
+            sd=sqrt(1/normal_parameters$tau[1])),from=2, to=14, add=TRUE,lwd=2,col='blue',ylim=c(0,1.4))
+legend('topright', legend=c('MLE','Posterior'), 
+       col=c('red','blue'), lty=1, bty='n', lwd=2, cex=1, text.col='black', horiz=F)
+grid()
+
+curve(dnorm(x,mean=mu_MLE_J,sd=sd_MLE_J),from=2,to=14,
+      lwd=3, col='red',main='R_HMag',ylab = 'densities')
+curve(dnorm(x,mean=normal_parameters$mu[2],sd=sqrt(1/normal_parameters$tau[2])),
+      from=2, to=14, add=TRUE,lwd=2,col='blue',ylim=c(0,1.4))
+legend('topright', legend=c('MLE','Posterior'),
+       col=c('red','blue'), lty=1, bty='n', lwd=2, cex=1, 
+       text.col='black', horiz=F)
+grid()
+
+curve(dnorm(x,mean=mu_MLE_K,sd=sd_MLE_K),from=2,to=14, 
+      lwd=3, col='red',main='R_HMag',ylab = 'densities')
+curve(dnorm(x,mean=normal_parameters$mu[3],sd=sqrt(1/normal_parameters$tau[3])),
+      from=2, to=14, add=TRUE,lwd=2,col='blue',ylim=c(0,1.4))
+legend('topright', legend=c('MLE','Posterior'), col=c('red','blue'), 
+       lty=1, bty='n', lwd=2, cex=1, text.col='black', horiz=F)
+grid()
+```
+
+
+
+## Kolmogorov-Smirnov Test
+
+In statistics, the Kolmogorov–Smirnov test (K–S test or KS test) is a nonparametric test of the equality of continuous, one-dimensional probability distributions that can be used to compare a sample with a reference probability distribution (one-sample K–S test), or to compare two samples (two-sample K–S test).
+
+The Kolmogorov–Smirnov statistic quantifies a distance between the empirical distribution function of the sample and the cumulative distribution function of the reference distribution, or between the empirical distribution functions of two samples. The null distribution of this statistic is calculated under the null hypothesis that the sample is drawn from the reference distribution.
+
+Since we discovered that for all the three types of measurements, the model that better fit our data is the normal, we want to do the following test:
+$$H_0:\text{The sample comes from the normal distribution}\quad\textit{vs}\quad H_1:\text{The sample doesn't come from a normal distribution}$$
+This will give two output:
+
+- The statistic $D$ that is the maximum distance between the sample distribution and the fitted distribution. For “small” value of we cannot reject the null hypothesis, otherwise if we get a “large” value for D we can reject the null hypothesis.
+- The p-value corresponding to the statistic D. We will reject the null hypothsis if the p-values is less than our significance level.
+```{r}
+parametersH<-fitdistr(Small_M$R_HMag,"normal")
+parametersJ<-fitdistr(Small_M$R_JMag,"normal")
+parametersK<-fitdistr(Small_M$R_KMag,"normal")
+
+mH<-parametersH$estimate[1]
+sdH<-parametersH$estimate[2]
+mJ<-parametersJ$estimate[1]
+sdJ<-parametersJ$estimate[2]
+mK<-parametersK$estimate[1]
+sdK<-parametersK$estimate[2]
+
+ks.test(unique(Small_M$R_HMag),"pnorm",mH,sdH)
+ks.test(unique(Small_M$R_JMag),"pnorm",mJ,sdJ)
+ks.test(unique(Small_M$R_KMag),"pnorm",mK,sdK)
+```
+
+We can see that in all test, we get a low value for $D$ and an high p-value, than in both cases we cannot reject the null hypothesis, so the samples come from a normal distribution.
+
+## Conclusions
+
+We analyzed some light flow, coming from observed stars, using a bayesian approach and finding that the best approximating model for the chosen data is the Normal one. We also compare this bayesian approach with the frequentist one, finding that the better approximation is again the normal. Therefore, we can assume that the normal model is the best fit for our porpouse. A possible interesting analysis can be taking into account the different infrared wavelength filters, trying to develop a single more complicated model, modifying the mean and the standard deviation of the normal.
+
+## References
+
+- Bayesian Data Analysis,Andrew Gelman and Donald Rubin.
+
+- Bayesian Modeling Using Winbugs, Wiley, Ntzoufras, Ioannis. 2009
+
+- [Magnitudine Apparente](https://it.wikipedia.org/wiki/Magnitudine_apparente)
+
+- [ESA](https://www.cosmos.esa.int/web/gaia) 
